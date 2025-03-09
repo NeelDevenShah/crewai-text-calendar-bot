@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Calendar</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+      }
+      #calendar-container {
+        max-width: 900px;
+        margin: 20px auto;
+      }
+      .form-container {
+        max-width: 400px;
+        margin: 20px auto;
+        padding: 20px;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        background: #f9f9f9;
+      }
+      input,
+      button {
+        width: 100%;
+        padding: 10px;
+        margin: 5px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h2 style="text-align: center">My Calendar</h2>
+    <div id="calendar-container">
+      <div id="calendar"></div>
+    </div>
+
+    <div class="form-container">
+      <h3>Add/Edit Event</h3>
+      <form id="event-form">
+        <input type="hidden" id="event-id" />
+        <label>Title:</label>
+        <input type="text" id="title" required />
+        <label>Start Date:</label>
+        <input type="datetime-local" id="start" required />
+        <label>End Date:</label>
+        <input type="datetime-local" id="end" required />
+        <button type="submit">Save Event</button>
+      </form>
+      <button
+        id="delete-event"
+        style="display: none; background: red; color: white"
+      >
+        Delete Event
+      </button>
+    </div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        let calendarEl = document.getElementById("calendar");
+        let calendar = new FullCalendar.Calendar(calendarEl, {
+          initialView: "dayGridMonth",
+          selectable: true,
+          editable: true,
+          events: "/api/events",
+          select: function (info) {
+            $("#event-id").val("");
+            $("#title").val("");
+            $("#start").val(info.startStr);
+            $("#end").val(info.endStr);
+            $("#delete-event").hide();
+          },
+          eventClick: function (info) {
+            $("#event-id").val(info.event.id);
+            $("#title").val(info.event.title);
+            $("#start").val(info.event.start.toISOString().slice(0, 16));
+            $("#end").val(
+              info.event.end ? info.event.end.toISOString().slice(0, 16) : ""
+            );
+            $("#delete-event").show();
+          },
+          eventDrop: function (info) {
+            updateEvent(info.event);
+          },
+          eventResize: function (info) {
+            updateEvent(info.event);
+          },
+        });
+        calendar.render();
+
+        $("#event-form").submit(function (e) {
+          e.preventDefault();
+          let eventId = $("#event-id").val();
+          let eventData = {
+            title: $("#title").val(),
+            start: $("#start").val(),
+            end: $("#end").val(),
+          };
+
+          if (eventId) {
+            eventData.id = eventId;
+            $.ajax({
+              url: "/api/events/" + eventId,
+              type: "PUT",
+              data: JSON.stringify(eventData),
+              contentType: "application/json",
+              success: function () {
+                location.reload();
+              },
+            });
+          } else {
+            $.post("/api/events", eventData, function () {
+              location.reload();
+            });
+          }
+        });
+
+        $("#delete-event").click(function () {
+          let eventId = $("#event-id").val();
+          if (eventId) {
+            $.ajax({
+              url: "/api/events/" + eventId,
+              type: "DELETE",
+              success: function () {
+                location.reload();
+              },
+            });
+          }
+        });
+      });
+
+      function updateEvent(event) {
+        let eventData = {
+          id: event.id,
+          title: event.title,
+          start: event.start.toISOString(),
+          end: event.end ? event.end.toISOString() : null,
+        };
+        $.ajax({
+          url: "/api/events/" + event.id,
+          type: "PUT",
+          data: JSON.stringify(eventData),
+          contentType: "application/json",
+        });
+      }
+    </script>
+  </body>
+</html>
