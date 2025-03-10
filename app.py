@@ -74,7 +74,7 @@ def create_event(start_time, end_time, description):
     return False, reason
 
 # Delete event
-def delete_event(start_time, end_time, description):
+def delete_event(start_time, end_time):
     df = load_calendar()
     
     # Find the matching event
