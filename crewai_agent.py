@@ -8,6 +8,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from crewai import Agent, Crew, Task, Process, LLM
 from langchain_groq import ChatGroq
+from crewai.tools import tool  # Import the Tool class
 
 load_dotenv()
 
@@ -36,7 +37,6 @@ def extract_json(text: str) -> Dict[str, Any]:
     return {"error": "No valid JSON found in AI response."}
 
 # 🔥 AI-Powered Intent Classification
-# - "intent" (Make sure the intent is from the given example only) (e.g., "create_event", "get_events", "update_event", "delete_event", "check_availability")
 def classify_user_intent(user_input: str) -> Dict[str, Any]:
     """Use AI to classify intent and extract structured event data."""
     prompt = f"""
@@ -89,48 +89,66 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
     print('***BYE')
     return fixed_json if fixed_json["intent"] != "unknown" else {"error": "Could not understand the request."}
 
-# 🎯 Calendar API Integration
-class CalendarAPI:
-    """Handles all calendar API requests."""
-    
-    @staticmethod
-    def create_event(event_details: Dict) -> Dict:
-        """Create a calendar event."""
-        try:
-            response = requests.post(f"{API_BASE_URL}/add", json=event_details)
-            return response.json()
-        except Exception as e:
-            return {"error": f"Failed to create event: {str(e)}"}
+@tool('create_event_tool')
+def create_event_tool(date_time: str, duration: str, description: str) -> Dict:
+    """Create a calendar event."""
+    print('Enter the tool of the create calendar event')
+    try:
+        # Extract specific details from event_details
+        event_data = {
+            "start_time": date_time,
+            "duration": duration,
+            "description": description
+        }
+        response = requests.post(f"{API_BASE_URL}/add", json=event_data)
+        response_data = response.json()
+        if response_data.get("success") == True:
+            return {"success": True}
+        else:
+            return {"success": False, "error": response_data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to create event: {str(e)}"}
 
-    @staticmethod
-    def get_events(date: str) -> Dict:
-        """Retrieve events for a given date."""
-        try:
-            response = requests.get(f"{API_BASE_URL}/get-events", params={"date": date})
-            return response.json()
-        except Exception as e:
-            return {"error": f"Failed to fetch events: {str(e)}"}
+@tool('get_events_tool')
+def get_events_tool(date: str) -> Dict:
+    """Retrieve events for a given date."""
+    print('Enter the tool of the get events')
+    try:
+        response = requests.get(f"{API_BASE_URL}/get-events", params={"date": date})
+        response_data = response.json()
+        if response_data.get("success") == True:
+            return {"success": True, "data": response_data}
+        else:
+            return {"success": False, "error": response_data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to fetch events: {str(e)}"}
 
-    @staticmethod
-    def check_availability(date_time: str, duration: str) -> Dict:
-        """Check available time slots."""
-        try:
-            response = requests.get(
-                f"{API_BASE_URL}/check-availability", 
-                params={"datetime": date_time, "duration": duration}
-            )
-            return response.json()
-        except Exception as e:
-            return {"error": f"Failed to check availability: {str(e)}"}
+@tool('check_availability_tool')
+def check_availability_tool(date_time: str, duration: str) -> Dict:
+    """Check available time slots."""
+    print('Enter the tool of the check availability')
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/check-availability", 
+            params={"datetime": date_time, "duration": duration}
+        )
+        response_data = response.json()
+        if response_data.get("success") == True:
+            return {"success": True, "data": response_data}
+        else:
+            return {"success": False, "error": response_data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to check availability: {str(e)}"}
 
-# 📌 CrewAI Agent
+# 📌 CrewAI Agent with tools
 calendar_agent = Agent(
     role="Calendar Assistant",
     goal="Help users manage their calendar seamlessly",
     backstory="You're an AI-powered calendar manager that schedules, updates, retrieves, and manages events.",
     verbose=True,
     allow_delegation=False,
-    llm=llm
+    llm=llm,
+    tools=[create_event_tool, get_events_tool, check_availability_tool]  # Using proper Tool instances
 )
 
 # 📝 Dynamically Create CrewAI Tasks
@@ -143,13 +161,14 @@ def create_calendar_task(user_input):
         response = parsed_input["message"]
         return Task(
             description="Engage in casual chat with the user",
-            expected_output="Friendly response",
+            expected_output="A friendly AI response to the user’s casual message",
             agent=calendar_agent,
             context=[{
-        "description": "Casual conversation with the user",
-        "expected_output": "A friendly and engaging response",
-        "response": response  # Keeping the response data
-    }]
+                "description": "User initiated a casual conversation.",
+                "expected_output": response,
+                "conversation_type": "casual",
+                "response": response  # Keeping the response data
+            }]
         )
 
     intent = parsed_input["intent"]
@@ -162,29 +181,50 @@ def create_calendar_task(user_input):
             description=f"Create an event: {description} on {date_time} for {duration} minutes",
             expected_output="Confirmation of event creation",
             agent=calendar_agent,
-            context=[{'description': f"Create an event: {description} on {date_time} for {duration} minutes", 'expected_output': 'Confirmation of event creation', "action": "create_event", "event_details": parsed_input}]
+            context=[{
+                "description": f"Create a calendar event for {description}",
+                "expected_output": "Success message confirming event creation.",
+                "intent": "create_event",
+                "event_details": parsed_input,
+                "required_tool": "create_event_tool"
+            }]
         )
     elif intent == "get_events":
         return Task(
             description=f"Retrieve events for {date_time}",
             expected_output="List of scheduled events",
             agent=calendar_agent,
-            context=[{"description": f"Retrieve events for {date_time}", "expected_output": "List of scheduled events", "action": "get_events", "date": date_time}]
+            context=[{
+                "description": f"Fetch all scheduled events for {date_time}",
+                "expected_output": "A list of events or a message if none exist.",
+                "intent": "get_events",
+                "date": date_time,
+                "required_tool": "get_events_tool"
+            }]
         )
     elif intent == "check_availability":
         return Task(
             description=f"Check availability for {date_time} for {duration} minutes",
             expected_output="Available time slots",
             agent=calendar_agent,
-            context=[{'description':f"Check availability for {date_time} for {duration} minutes", 'expected_output': "Available time slots", "action": "check_availability", "date_time": date_time, "duration": duration}]
+            context=[{
+                "description": f"Check if there are free slots on {date_time} for {duration} minutes.",
+                "expected_output": "A list of available time slots or a message indicating no availability.",
+                "intent": "check_availability",
+                "date_time": date_time,
+                "duration": duration,
+                "required_tool": "check_availability_tool"
+            }]
         )
 
     return Task(
-        description="clarify_user_request",
+        description="Clarify user request",
         expected_output="Request more details from the user",
         agent=calendar_agent,
-        context=[{"description":"Clarify user request",
-        "expected_output": "Request more details from the user","response": "Could not determine intent."}]
+        context=[{
+            "intent": "clarify",
+            "message": "I'm not sure what you're asking for. Could you provide more details about what you'd like to do with your calendar?"
+        }]
     )
 
 # 💬 WhatsApp-Like Chat UI
@@ -208,7 +248,7 @@ def chatbot():
 
         result = crew.kickoff()
         
-        print(f"Bot:{result}")  # Blue bot text
+        print(f"\033[1;34mBot: {result}\033[0m")  # Blue bot text
 
 if __name__ == "__main__":
     chatbot()
