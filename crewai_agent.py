@@ -7,22 +7,22 @@ from typing import Dict, Any
 from datetime import datetime
 from dotenv import load_dotenv
 from crewai import Agent, Crew, Task, Process, LLM
-from langchain_groq import ChatGroq
 from crewai.tools import tool  # Import the Tool class
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
 # API Configuration
 API_BASE_URL = "http://127.0.0.1:5000"
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
 # Initialize AI Model
-llm_2 = ChatGroq(
-    temperature=0.3,
-    api_key=GROQ_API_KEY
-)
-
-llm = LLM(model="groq/llama-3.3-70b-versatile")
+llm_2 = ChatGoogleGenerativeAI(model="gemini-2.0-flash",
+                             verbose = True,
+                             temperature = 0.6,
+                             google_api_key=GEMINI_API_KEY)
+llm = LLM(model="gemini/gemini-2.0-flash")
 
 # 🛠 Utility: Extract JSON using Regex
 def extract_json(text: str) -> Dict[str, Any]:
@@ -114,7 +114,7 @@ def get_events_tool(date: str) -> Dict:
     """Retrieve events for a given date."""
     print('Enter the tool of the get events')
     try:
-        response = requests.get(f"{API_BASE_URL}/get-events", params={"date": date})
+        response = requests.get(f"{API_BASE_URL}/get-events-by-date", params={"date": date})
         response_data = response.json()
         if response_data.get("success") == True:
             return {"success": True, "data": response_data}

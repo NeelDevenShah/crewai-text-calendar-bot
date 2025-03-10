@@ -2,6 +2,7 @@ import os
 import datetime
 import pandas as pd
 from flask import Flask, request, render_template, jsonify
+import re
 
 app = Flask(__name__)
 
@@ -57,6 +58,65 @@ def delete_event(start_time, end_time, description):
         save_calendar(df)
         return True
     return False
+
+def load_calendar(csv_path="calendar.csv"):
+    """
+    Loads calendar events from a CSV file.
+    Expected CSV columns: ["start_time", "end_time"]
+    Both should be in ISO format: "YYYY-MM-DDTHH:MM"
+    """
+    df = pd.read_csv(csv_path)
+    df["start_time"] = pd.to_datetime(df["start_time"])
+    df["end_time"] = pd.to_datetime(df["end_time"])
+    return df
+
+@app.route('/available-slots', methods=['GET'])
+def get_available_slots():
+    """
+    Finds available time slots for a given date and meeting duration.
+
+    :return: List of available time slots.
+    """
+    date_str = request.args.get('date')  # Expected format: "YYYY-MM-DD"
+    duration_str = request.args.get('duration')  # Expected format: "60 minutes" or similar
+
+    # Extract number from duration string using regex
+    duration_match = re.search(r'\d+', duration_str)
+    if not duration_match:
+        return jsonify({"success": False, "error": "Invalid duration format"})
+
+    duration = int(duration_match.group())
+
+    df = load_calendar()
+    date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+
+    working_hours = (9, 17)  # Office hours (9 AM - 5 PM)
+    slot_duration = datetime.timedelta(minutes=duration)
+
+    # Filter events for the given date
+    events = df[(df["start_time"].dt.date == date)]
+
+    # Generate all possible time slots
+    start_time = datetime.datetime.combine(date, datetime.time(working_hours[0], 0))
+    end_time = datetime.datetime.combine(date, datetime.time(working_hours[1], 0))
+
+    free_slots = []
+    current_time = start_time
+
+    while current_time + slot_duration <= end_time:
+        potential_end_time = current_time + slot_duration
+
+        # Check if slot overlaps with any event
+        is_conflicting = events.apply(
+            lambda row: (current_time < row["end_time"]) and (potential_end_time > row["start_time"]), axis=1
+        ).any()
+
+        if not is_conflicting:
+            free_slots.append({"start": current_time.isoformat(), "end": potential_end_time.isoformat()})
+
+        current_time += slot_duration  # Move to the next possible slot
+
+    return jsonify({"success": True, "available_slots": free_slots})
 
 @app.route('/add', methods=['POST'])
 def add_event():
@@ -121,7 +181,7 @@ def get_events_by_datetime():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
-@app.route('/check-availability', methods=['GET'])
+@app.route('/check-specific-availability', methods=['GET'])
 def check_slot_availability():
     datetime_str = request.args.get('datetime')  # Expected: "YYYY-MM-DDTHH:MM"
     duration = int(request.args.get('duration'))  # Expected: Minutes
