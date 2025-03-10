@@ -2,3 +2,4 @@ langchain-google-genai
 langgraph
 flask
 python-dotenv
+langchain-groq

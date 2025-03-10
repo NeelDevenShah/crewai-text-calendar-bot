@@ -1,18 +1,17 @@
-import datetime
+import re
+import json
 import requests
 import google.generativeai as genai
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.tools import Tool
-from typing import List, Dict, Any, TypedDict, Annotated, Sequence, Literal, Optional
+from typing import List, Dict, Any, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, BaseMessage, FunctionMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent
-from typing import TypedDict, List, Dict, Any
-import operator
-import json
 import os
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Add this class definition:
 class ToolInvocation(TypedDict):
@@ -37,11 +36,69 @@ llm = ChatGoogleGenerativeAI(
     convert_system_message_to_human=False  # Using this parameter to avoid deprecation warning
 )
 
+def parse_user_input(user_input: str) -> Dict[str, str]:
+    """Extract date, time, and title from user input."""
+    # Extract date and time using regex
+    date_time_match = re.search(r"(\d{1,2}(th|st|nd|rd)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4})\s+at\s+(\d{1,2}:\d{2}\s*(am|pm)?", user_input, re.IGNORECASE)
+    if not date_time_match:
+        return {"error": "Please provide a date and time in a valid format (e.g., '10th March 2025 at 9 am')."}
+    
+    date_str = date_time_match.group(1)
+    time_str = date_time_match.group(3)
+    am_pm = date_time_match.group(4).lower() if date_time_match.group(4) else ""
+    
+    # Convert date to YYYY-MM-DD format
+    try:
+        date_obj = datetime.strptime(date_str, "%d %B %Y")
+        date = date_obj.strftime("%Y-%m-%d")
+    except ValueError:
+        return {"error": "Invalid date format. Please use a format like '10th March 2025'."}
+    
+    # Convert time to 24-hour format
+    try:
+        time_obj = datetime.strptime(f"{time_str} {am_pm}", "%I:%M %p")
+        time = time_obj.strftime("%H:%M")
+    except ValueError:
+        return {"error": "Invalid time format. Please use a format like '9 am' or '2:30 pm'."}
+    
+    # Extract title
+    title_match = re.search(r"for\s+(.+)", user_input, re.IGNORECASE)
+    if not title_match:
+        return {"error": "Please provide a title for the meeting (e.g., 'for the internal meeting')."}
+    title = title_match.group(1).strip()
+    
+    return {"date": date, "time": time, "title": title}
+
+def parse_date_time(date_time_str: str) -> Dict[str, str]:
+    """Parse and validate date and time input."""
+    try:
+        # Try parsing with date and time
+        dt = datetime.strptime(date_time_str, "%Y-%m-%d %H:%M")
+        return {"date": dt.strftime("%Y-%m-%d"), "time": dt.strftime("%H:%M")}
+    except ValueError:
+        try:
+            # Try parsing with date only
+            dt = datetime.strptime(date_time_str, "%Y-%m-%d")
+            return {"date": dt.strftime("%Y-%m-%d"), "time": "00:00"}  # Default time
+        except ValueError:
+            return {"error": "Invalid date or time format. Please use 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD'."}
+        
+def validate_event_details(date: str, time: str, title: str) -> Dict[str, str]:
+    """Validate event details."""
+    if not date:
+        return {"error": "Date is required."}
+    if not time:
+        return {"error": "Time is required."}
+    if not title:
+        return {"error": "Title is required."}
+    return {"success": "Valid input."}
+
+
 # Calendar Event API Functions
 def get_events_by_date(date: str) -> Dict:
     """Retrieve events by date."""
     try:
-        response = requests.get(f"{API_BASE_URL}/get-events", params={"date": date})
+        response = requests.get(f"{API_BASE_URL}/get-events-by-date", params={"date": date})
         return response.json()
     except Exception as e:
         return {"error": f"Failed to get events: {str(e)}"}
@@ -53,7 +110,7 @@ def get_events_by_datetime(date_time: str) -> Dict:
         if len(parts) != 2:
             return {"error": "Please provide both date and time in format 'YYYY-MM-DD HH:MM'"}
         date, time = parts
-        response = requests.get(f"{API_BASE_URL}/get-events", params={"date": date, "time": time})
+        response = requests.get(f"{API_BASE_URL}/get-events-by-datetime", params={"date": date, "time": time})
         return response.json()
     except Exception as e:
         return {"error": f"Failed to get events: {str(e)}"}
@@ -67,16 +124,18 @@ def create_event(event_details: str) -> Dict:
         date = details.get("date", "")
         time = details.get("time", "")
         
-        if not all([title, date, time]):
-            return {"error": "Missing required fields: title, date, or time"}
+        # Validate input
+        validation = validate_event_details(title, date, time)
+        if "error" in validation:
+            return validation
         
         response = requests.post(
-            f"{API_BASE_URL}/add-event", 
+            f"{API_BASE_URL}/add", 
             json={"title": title, "date": date, "time": time}
         )
         return response.json()
     except json.JSONDecodeError:
-        return {"error": "Invalid JSON format for event details"}
+        return {"error": "Invalid JSON format for event details."}
     except Exception as e:
         return {"error": f"Failed to create event: {str(e)}"}
 
@@ -109,6 +168,14 @@ def update_event(update_details: str) -> Dict:
     except Exception as e:
         return {"error": f"Failed to update event: {str(e)}"}
 
+def check_availability(date: str) -> Dict:
+    """Check available time slots for a given date."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/check-availability", params={"date": date})
+        return response.json()
+    except Exception as e:
+        return {"error": f"Failed to check availability: {str(e)}"}
+
 # Define tools for LangGraph
 tools = [
     Tool(
@@ -130,6 +197,11 @@ tools = [
         name="update_event",
         func=update_event,
         description="Update an existing calendar event. Input format: JSON string with old_date, old_time, new_title, new_date, and new_time. Example: '{\"old_date\": \"2025-03-10\", \"old_time\": \"14:30\", \"new_title\": \"Updated Meeting\", \"new_date\": \"2025-03-11\", \"new_time\": \"15:00\"}'"
+    ),
+    Tool(
+        name="check_availability",
+        func=check_availability,
+        description="Check available time slots for a given date. Input format: YYYY-MM-DD"
     ),
 ]
 
@@ -229,6 +301,26 @@ def build_graph():
 # Build the graph
 graph = build_graph()
 
+def handle_user_input(user_input: str) -> Dict:
+    """Handle user input for booking a meeting."""
+    # Parse user input
+    parsed_input = parse_user_input(user_input)
+    if "error" in parsed_input:
+        return parsed_input
+    
+    # Validate event details
+    validation = validate_event_details(parsed_input["date"], parsed_input["time"], parsed_input["title"])
+    if "error" in validation:
+        return validation
+    
+    # Create the event
+    event_details = json.dumps({
+        "title": parsed_input["title"],
+        "date": parsed_input["date"],
+        "time": parsed_input["time"]
+    })
+    return create_event(event_details)
+
 def chatbot():
     print("Welcome! How can I assist with your calendar events?")
     messages = []
@@ -239,23 +331,12 @@ def chatbot():
             print("Goodbye!")
             break
         
-        # Add user message to state
-        messages.append(HumanMessage(content=user_input))
-        
-        # Initialize the state with the messages
-        state = {"messages": messages, "tool_calls": [], "tool_results": []}
-        
-        # Execute the graph
-        result = graph.invoke(state)
-        
-        # Update messages from result
-        messages = result["messages"]
-        
-        # Print the agent's response (last AIMessage)
-        for message in reversed(messages):
-            if isinstance(message, AIMessage):
-                print(f"Bot: {message.content}")
-                break
+        # Handle user input
+        response = handle_user_input(user_input)
+        if "error" in response:
+            print(f"Bot: {response['error']}")
+        else:
+            print(f"Bot: {response.get('message', 'Meeting booked successfully!')}")
 
 if __name__ == "__main__":
     chatbot()
