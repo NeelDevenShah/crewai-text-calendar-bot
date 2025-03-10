@@ -41,10 +41,11 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
     """Use AI to classify intent and extract structured event data."""
     prompt = f"""
     You are a calendar assistant. Identify the user's intent and extract:
-    - "intent" (Make sure the intent is from the given example only) (e.g., "casual_chat", "create_event", "get_events", "check_availability", "clarify_user_request")
+    - "intent" (Make sure the intent is from the given example only) (e.g., "casual_chat", "create_event", "get_events", "check_availability", "update_event", "delete_event", "clarify_user_request")
     - "date_time" (ISO format: YYYY-MM-DDTHH:MM)
     - "duration" (in minutes, default 60 if unspecified)
     - "description" (Short summary of the event)
+    - "old_date_time" (ISO format: YYYY-MM-DDTHH:MM) - Only for update_event intent
 
     If the user is just chatting (e.g., "Hey, how are you?"), return:
     {{
@@ -86,6 +87,11 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
         "duration": str(parsed_json.get("duration", "60")),  # Default: 60 minutes
         "description": parsed_json.get("description", "No description provided")
     }
+    
+    # Add old_date_time for update events if it exists
+    if parsed_json.get("old_date_time"):
+        fixed_json["old_date_time"] = parsed_json.get("old_date_time")
+    
     print('***BYE')
     return fixed_json if fixed_json["intent"] != "unknown" else {"error": "Could not understand the request."}
 
@@ -103,7 +109,7 @@ def create_event_tool(date_time: str, duration: str, description: str) -> Dict:
         response = requests.post(f"{API_BASE_URL}/add", json=event_data)
         response_data = response.json()
         if response_data.get("success") == True:
-            return {"success": True}
+            return {"success": True, "message": response_data.get("message", "Event created successfully")}
         else:
             return {"success": False, "error": response_data.get("error", "Unknown error")}
     except Exception as e:
@@ -114,6 +120,10 @@ def get_events_tool(date: str) -> Dict:
     """Retrieve events for a given date."""
     print('Enter the tool of the get events')
     try:
+        # Format the date to YYYY-MM-DD if it contains a time component
+        if "T" in date:
+            date = date.split("T")[0]
+            
         response = requests.get(f"{API_BASE_URL}/get-events-by-date", params={"date": date})
         response_data = response.json()
         if response_data.get("success") == True:
@@ -125,12 +135,33 @@ def get_events_tool(date: str) -> Dict:
 
 @tool('check_availability_tool')
 def check_availability_tool(date_time: str, duration: str) -> Dict:
-    """Check available time slots."""
+    """Check if a specific time slot is available."""
     print('Enter the tool of the check availability')
     try:
         response = requests.get(
-            f"{API_BASE_URL}/check-availability", 
+            f"{API_BASE_URL}/check-specific-availability", 
             params={"datetime": date_time, "duration": duration}
+        )
+        response_data = response.json()
+        if response_data.get("success") == True:
+            return {"success": True, "available": response_data.get("available"), "reason": response_data.get("reason")}
+        else:
+            return {"success": False, "error": response_data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to check availability: {str(e)}"}
+
+@tool('get_available_slots_tool')
+def get_available_slots_tool(date: str, duration: str) -> Dict:
+    """Get all available time slots for a given date and duration."""
+    print('Enter the tool of the get available slots')
+    try:
+        # Format the date to YYYY-MM-DD if it contains a time component
+        if "T" in date:
+            date = date.split("T")[0]
+            
+        response = requests.get(
+            f"{API_BASE_URL}/available-slots", 
+            params={"date": date, "duration": duration}
         )
         response_data = response.json()
         if response_data.get("success") == True:
@@ -138,7 +169,46 @@ def check_availability_tool(date_time: str, duration: str) -> Dict:
         else:
             return {"success": False, "error": response_data.get("error", "Unknown error")}
     except Exception as e:
-        return {"success": False, "error": f"Failed to check availability: {str(e)}"}
+        return {"success": False, "error": f"Failed to get available slots: {str(e)}"}
+
+@tool('update_event_tool')
+def update_event_tool(old_date_time: str, new_date_time: str, duration: str, description: str) -> Dict:
+    """Update an existing calendar event."""
+    print('Enter the tool of the update event')
+    try:
+        event_data = {
+            "old_start_time": old_date_time,
+            "new_start_time": new_date_time,
+            "duration": duration,
+            "description": description
+        }
+        response = requests.put(f"{API_BASE_URL}/update-event", json=event_data)
+        response_data = response.json()
+        if response_data.get("success") == True:
+            return {"success": True, "message": response_data.get("message", "Event updated successfully")}
+        else:
+            return {"success": False, "error": response_data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to update event: {str(e)}"}
+
+@tool('delete_event_tool')
+def delete_event_tool(date_time: str, duration: str, description: str) -> Dict:
+    """Delete a calendar event."""
+    print('Enter the tool of the delete event')
+    try:
+        event_data = {
+            "start_time": date_time,
+            "duration": duration,
+            "description": description
+        }
+        response = requests.delete(f"{API_BASE_URL}/delete", json=event_data)
+        response_data = response.json()
+        if response_data.get("success") == True:
+            return {"success": True, "message": response_data.get("message", "Event deleted successfully")}
+        else:
+            return {"success": False, "error": response_data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to delete event: {str(e)}"}
 
 # 📌 CrewAI Agent with tools
 calendar_agent = Agent(
@@ -148,7 +218,8 @@ calendar_agent = Agent(
     verbose=True,
     allow_delegation=False,
     llm=llm,
-    tools=[create_event_tool, get_events_tool, check_availability_tool]  # Using proper Tool instances
+    tools=[create_event_tool, get_events_tool, check_availability_tool, 
+           get_available_slots_tool, update_event_tool, delete_event_tool]
 )
 
 # 📝 Dynamically Create CrewAI Tasks
@@ -161,7 +232,7 @@ def create_calendar_task(user_input):
         response = parsed_input["message"]
         return Task(
             description="Engage in casual chat with the user",
-            expected_output="A friendly AI response to the user’s casual message",
+            expected_output="A friendly AI response to the user's casual message",
             agent=calendar_agent,
             context=[{
                 "description": "User initiated a casual conversation.",
@@ -214,6 +285,52 @@ def create_calendar_task(user_input):
                 "date_time": date_time,
                 "duration": duration,
                 "required_tool": "check_availability_tool"
+            }]
+        )
+    elif intent == "update_event":
+        old_date_time = parsed_input.get("old_date_time", date_time)
+        return Task(
+            description=f"Update event from {old_date_time} to {date_time} for {duration} minutes",
+            expected_output="Confirmation of event update",
+            agent=calendar_agent,
+            context=[{
+                "description": f"Update a calendar event from {old_date_time} to {date_time}",
+                "expected_output": "Success message confirming event update.",
+                "intent": "update_event",
+                "old_date_time": old_date_time,
+                "new_date_time": date_time,
+                "duration": duration,
+                "description": description,
+                "required_tool": "update_event_tool"
+            }]
+        )
+    elif intent == "delete_event":
+        return Task(
+            description=f"Delete event: {description} on {date_time}",
+            expected_output="Confirmation of event deletion",
+            agent=calendar_agent,
+            context=[{
+                "description": f"Delete a calendar event for {description} on {date_time}",
+                "expected_output": "Success message confirming event deletion.",
+                "intent": "delete_event",
+                "date_time": date_time,
+                "duration": duration,
+                "description": description,
+                "required_tool": "delete_event_tool"
+            }]
+        )
+    elif intent == "get_available_slots":
+        return Task(
+            description=f"Find available slots on {date_time} for {duration} minutes",
+            expected_output="List of available time slots",
+            agent=calendar_agent,
+            context=[{
+                "description": f"Find all available time slots on {date_time} for a {duration}-minute meeting.",
+                "expected_output": "A list of available time slots or a message indicating no availability.",
+                "intent": "get_available_slots",
+                "date": date_time,
+                "duration": duration,
+                "required_tool": "get_available_slots_tool"
             }]
         )
 
