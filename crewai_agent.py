@@ -4,24 +4,30 @@ import os
 import re
 import sys
 from typing import Dict, Any, List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from crewai import Agent, Crew, Task, Process, LLM
-from crewai.tools import tool  # Import the Tool class
+from crewai.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+# Load environment variables
 load_dotenv()
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # API Configuration
 API_BASE_URL = "http://127.0.0.1:5000"
-current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
 # Initialize AI Model
 llm_2 = ChatGoogleGenerativeAI(model="gemini-2.0-flash",
-                             verbose = True,
-                             temperature = 0.6,
+                             verbose=True,
+                             temperature=0.6,
                              google_api_key=GEMINI_API_KEY)
 llm = LLM(model="gemini/gemini-2.0-flash")
 
@@ -39,6 +45,21 @@ def extract_json(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             return {"error": "Invalid JSON format extracted from AI response."}
     return {"error": "No valid JSON found in AI response."}
+
+# Format date helper function
+def format_date_iso(date_str: str) -> str:
+    """
+    Ensure date is in ISO format YYYY-MM-DDTHH:MM
+    If only date is provided, append default time (9:00 AM)
+    """
+    if not date_str:
+        return datetime.now().strftime('%Y-%m-%dT09:00')
+    
+    # If only date is provided (no time)
+    if 'T' not in date_str:
+        return f"{date_str}T09:00"
+    
+    return date_str
 
 # Add entry to conversation history
 def add_to_history(role: str, content: str, metadata: Dict = None):
@@ -80,11 +101,13 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
     """Use AI to classify intent and extract structured event data."""
     # Add conversation history for context
     context = get_conversation_context()
+    current_date = datetime.now()
     
     prompt = f"""
-    You are a calendar assistant. Identify the user's intent and extract:
+    You are a calendar assistant. Today's date is {current_date.strftime('%Y-%m-%d')}.
+    Identify the user's intent and extract:
     - "intent" (Make sure the intent is from the given example only) (e.g., "casual_chat", "create_event", "get_events", "check_availability", "update_event", "delete_event", "clarify_user_request")
-    - "date_time" (ISO format: YYYY-MM-DDTHH:MM)
+    - "date_time" (ISO format: YYYY-MM-DDTHH:MM) - Use today's date {current_date.strftime('%Y-%m-%d')} as default if no date is specified
     - "duration" (in minutes, default 60 if unspecified)
     - "description" (Short summary of the event)
     - "old_date_time" (ISO format: YYYY-MM-DDTHH:MM) - Only for update_event intent
@@ -95,6 +118,8 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
       "intent": "casual_chat",
       "message": "Friendly response"
     }}
+
+    For relative dates like "tomorrow" or "next Monday", convert them to actual dates based on today being {current_date.strftime('%Y-%m-%d')}.
 
     Return a valid JSON object. Example:
     {{
@@ -114,14 +139,8 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
     # Extract and validate JSON
     parsed_json = extract_json(raw_text)
     
-    print('----------')
-    print(parsed_json)
-    print(parsed_json['intent'])
-    print('----------')
-    
     # If casual chat, just return the AI-generated message
     if parsed_json.get("intent") == "casual_chat":
-        print('***BYE1')
         return {"casual_chat": True, "message": parsed_json.get("message", "I'm here to help!")}
 
     # Ensure all required fields exist, fixing missing values
@@ -130,14 +149,24 @@ def classify_user_intent(user_input: str) -> Dict[str, Any]:
         "date_time": parsed_json.get("date_time", datetime.now().isoformat()),  # Default: now
         "duration": str(parsed_json.get("duration", "60")),  # Default: 60 minutes
         "description": parsed_json.get("description", "No description provided"),
-        "reference_context": parsed_json.get("reference_context", "")
+        "reference_context": parsed_json.get("reference_context", ""),
+        "missing_fields": []
     }
     
     # Add old_date_time for update events if it exists
     if parsed_json.get("old_date_time"):
         fixed_json["old_date_time"] = parsed_json.get("old_date_time")
     
-    print('***BYE')
+    # Check for required fields for event creation/updates
+    if fixed_json["intent"] in ["create_event", "update_event"]:
+        # Date time validation with default of current date if missing
+        if not parsed_json.get("date_time") or parsed_json.get("date_time") == "":
+            fixed_json["missing_fields"].append("date_time")
+            
+        # Description validation
+        if not parsed_json.get("description") or parsed_json.get("description") == "No description provided":
+            fixed_json["missing_fields"].append("description")
+    
     return fixed_json if fixed_json["intent"] != "unknown" else {"error": "Could not understand the request."}
 
 # Find referenced event in history
@@ -157,7 +186,6 @@ def find_referenced_event() -> Dict:
 @tool('create_event_tool')
 def create_event_tool(date_time: str, duration: str, description: str) -> Dict:
     """Create a calendar event."""
-    print('Enter the tool of the create calendar event')
     try:
         # Extract specific details from event_details
         event_data = {
@@ -176,10 +204,8 @@ def create_event_tool(date_time: str, duration: str, description: str) -> Dict:
 
 @tool('get_events_tool')
 def get_events_tool(date: str) -> Dict:
-    """Retrieve events for a given date."""
-    print('Enter the tool of the get events')
+    """Retrieve events for a given date. Format the date to YYYY-MM-DD if it contains a time component."""
     try:
-        # Format the date to YYYY-MM-DD if it contains a time component
         if "T" in date:
             date = date.split("T")[0]
             
@@ -195,7 +221,6 @@ def get_events_tool(date: str) -> Dict:
 @tool('check_availability_tool')
 def check_availability_tool(date_time: str, duration: str) -> Dict:
     """Check if a specific time slot is available."""
-    print('Enter the tool of the check availability')
     try:
         response = requests.get(
             f"{API_BASE_URL}/check-specific-availability", 
@@ -212,7 +237,6 @@ def check_availability_tool(date_time: str, duration: str) -> Dict:
 @tool('get_available_slots_tool')
 def get_available_slots_tool(date: str, duration: str) -> Dict:
     """Get all available time slots for a given date and duration."""
-    print('Enter the tool of the get available slots')
     try:
         # Format the date to YYYY-MM-DD if it contains a time component
         if "T" in date:
@@ -233,7 +257,6 @@ def get_available_slots_tool(date: str, duration: str) -> Dict:
 @tool('update_event_tool')
 def update_event_tool(old_date_time: str, new_date_time: str, duration: str, description: str) -> Dict:
     """Update an existing calendar event."""
-    print('Enter the tool of the update event')
     try:
         event_data = {
             "old_start_time": old_date_time,
@@ -253,7 +276,6 @@ def update_event_tool(old_date_time: str, new_date_time: str, duration: str, des
 @tool('delete_event_tool')
 def delete_event_tool(date_time: str, duration: str) -> Dict:
     """Delete a calendar event."""
-    print('Enter the tool of the delete event')
     try:
         event_data = {
             "start_time": date_time,
@@ -287,6 +309,9 @@ def create_calendar_task(user_input):
     
     # Add to conversation history
     add_to_history("user", user_input)
+    
+    # Get current date for context
+    current_date = datetime.now()
 
     # Handle casual chat
     if "casual_chat" in parsed_input:
@@ -301,15 +326,53 @@ def create_calendar_task(user_input):
                 "expected_output": response,
                 "conversation_type": "casual",
                 "response": response,  # Keeping the response data
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
+            }]
+        )
+
+    # Handle error in parsing
+    if "error" in parsed_input:
+        response = "I'm not sure what you're asking for. Could you provide more details about what you'd like to do with your calendar?"
+        add_to_history("assistant", response, {"intent": "error"})
+        return Task(
+            description="Handle parsing error",
+            expected_output="Ask user for clarification",
+            agent=calendar_agent,
+            context=[{
+                "description": "Failed to parse user intent.",
+                "expected_output": response,
+                "response": response,
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
 
     intent = parsed_input["intent"]
-    date_time = parsed_input.get("date_time")
+    date_time = parsed_input.get("date_time", "")
     duration = parsed_input.get("duration", "60")  # Default: 60 min
     description = parsed_input.get("description", "")
     reference_context = parsed_input.get("reference_context", "")
+    missing_fields = parsed_input.get("missing_fields", [])
+    
+    # Check for missing required fields for create and update intents
+    if (intent == "create_event" or intent == "update_event") and missing_fields:
+        missing_info = ", ".join(missing_fields)
+        response = f"I need more information to {intent.replace('_', ' ')}. Please provide: {missing_info}."
+        add_to_history("assistant", response, {"intent": "request_info", "missing_fields": missing_fields})
+        return Task(
+            description="Request missing information",
+            expected_output="Ask user for required details",
+            agent=calendar_agent,
+            context=[{
+                "description": f"Request missing information for {intent}",
+                "expected_output": response,
+                "response": response,
+                "missing_fields": missing_fields,
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
+            }]
+        )
     
     # Try to resolve references to previous events
     if reference_context and (intent == "update_event" or intent == "delete_event"):
@@ -323,6 +386,9 @@ def create_calendar_task(user_input):
             if duration == "60":
                 duration = referenced_event.get("duration", duration)
 
+    # Ensure date_time is properly formatted with current date as default
+    date_time = format_date_iso(date_time)
+    
     if intent == "create_event":
         task = Task(
             description=f"Create an event: {description} on {date_time} for {duration} minutes",
@@ -332,9 +398,14 @@ def create_calendar_task(user_input):
                 "description": f"Create a calendar event for {description}",
                 "expected_output": "Success message confirming event creation.",
                 "intent": "create_event",
-                "event_details": parsed_input,
+                "event_details": {
+                    "date_time": date_time,
+                    "duration": duration,
+                    "description": description
+                },
                 "required_tool": "create_event_tool",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     elif intent == "get_events":
@@ -348,7 +419,8 @@ def create_calendar_task(user_input):
                 "intent": "get_events",
                 "date": date_time,
                 "required_tool": "get_events_tool",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     elif intent == "check_availability":
@@ -363,7 +435,8 @@ def create_calendar_task(user_input):
                 "date_time": date_time,
                 "duration": duration,
                 "required_tool": "check_availability_tool",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     elif intent == "update_event":
@@ -381,7 +454,8 @@ def create_calendar_task(user_input):
                 "duration": duration,
                 "description": description,
                 "required_tool": "update_event_tool",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     elif intent == "delete_event":
@@ -397,7 +471,8 @@ def create_calendar_task(user_input):
                 "duration": duration,
                 "description": description,
                 "required_tool": "delete_event_tool",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     elif intent == "get_available_slots":
@@ -412,7 +487,8 @@ def create_calendar_task(user_input):
                 "date": date_time,
                 "duration": duration,
                 "required_tool": "get_available_slots_tool",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     else:
@@ -423,37 +499,82 @@ def create_calendar_task(user_input):
             context=[{
                 "intent": "clarify",
                 "message": "I'm not sure what you're asking for. Could you provide more details about what you'd like to do with your calendar?",
-                "conversation_history": get_conversation_context()
+                "conversation_history": get_conversation_context(),
+                "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     
     return task
 
-# 💬 WhatsApp-Like Chat UI
-def chatbot():
-    print("\n💬 Welcome to AI Calendar Assistant! Type 'exit' to quit.\n")
-
-    while True:
-        user_input = input("You:")  # Green user text
-        if user_input.lower() in ["exit", "quit"]:
-            print("Bot: Goodbye! Have a great day!")
-            break
-
+def process_user_message(user_input: str) -> Dict[str, Any]:
+    """Process user input and return response"""
+    try:
+        # Create task based on user input
+        print(f'user: {user_input}')
         task = create_calendar_task(user_input)
-
+        
+        # Create and execute crew
         crew = Crew(
             agents=[calendar_agent],
-            tasks=[task],  # Pass task in a list
+            tasks=[task],
             verbose=False,
             process=Process.sequential
         )
-
+        
         result = crew.kickoff()
         
         # Add assistant's response to history
         add_to_history("assistant", result, task.context[0] if task.context else {})
         
-        print(f"Bot: {result}")  # Blue bot text
+        # TODO: Manage the things( for example events, succes) that we are sending to the frontend, that is the object result, for temporary purposes sending the message to the user.
+        print(f'agent: {result}')
+        print(result.raw)
+        print('----------------------')
+        
+        return {
+            "success": True,
+            "message": result.raw
+        }
+    except Exception as e:
+        error_message = f"Error processing message: {str(e)}"
+        return {
+            "success": False,
+            "message": f"error: {error_message}"
+        }
+
+# API Routes
+@app.route('/api/message', methods=['POST'])
+def handle_message():
+    """API endpoint to handle user messages"""
+    data = request.json
+    if not data or 'message' not in data:
+        return jsonify({
+            "success": False,
+            "message": "Message field is required"
+        }), 400
+    
+    user_message = data['message']
+    response = process_user_message(user_message)
+    return response
+    
+
+@app.route('/api/history', methods=['GET'])
+def get_history():
+    """API endpoint to get conversation history"""
+    return jsonify({
+        "success": True,
+        "history": conversation_history
+    })
+
+@app.route('/api/clear-history', methods=['POST'])
+def clear_history():
+    """API endpoint to clear conversation history"""
+    global conversation_history
+    conversation_history = []
+    return jsonify({
+        "success": True,
+        "message": "Conversation history cleared"
+    })
 
 if __name__ == "__main__":
-    chatbot()
+    app.run(host='0.0.0.0', port=5001, debug=True)

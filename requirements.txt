@@ -3,3 +3,4 @@ langgraph
 flask
 python-dotenv
 langchain-groq
+flask-cors

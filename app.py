@@ -80,8 +80,7 @@ def delete_event(start_time, end_time):
     # Find the matching event
     match_index = df[
         (df["start_time"] == start_time) & 
-        (df["end_time"] == end_time) & 
-        (df["description"] == description)
+        (df["end_time"] == end_time)
     ].index
 
     if not match_index.empty:
