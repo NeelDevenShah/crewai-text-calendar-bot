@@ -74,13 +74,12 @@ def create_event(start_time, end_time, description):
     return False, reason
 
 # Delete event
-def delete_event(start_time, end_time):
+def delete_event(start_time):
     df = load_calendar()
     
     # Find the matching event
     match_index = df[
-        (df["start_time"] == start_time) & 
-        (df["end_time"] == end_time)
+        (df["start_time"] == start_time)
     ].index
 
     if not match_index.empty:
@@ -136,7 +135,7 @@ def get_available_slots():
 
     return jsonify({
         "success": True, 
-        "available_slots": free_slots,
+        "slots": free_slots,
         "message": f"Found {len(free_slots)} available time slots for the requested date and duration"
     })
 
@@ -165,8 +164,7 @@ def delete_event_route():
     data = request.json
     try:
         start_time = datetime.datetime.strptime(data['start_time'], "%Y-%m-%dT%H:%M")
-        end_time = start_time + datetime.timedelta(minutes=int(data['duration']))
-        success, message = delete_event(start_time, end_time, data['description'])
+        success, message = delete_event(start_time)
         if success:
             return jsonify({"success": True, "message": message})
         else:
@@ -190,7 +188,7 @@ def get_events_by_date():
         events_list = filtered_events.to_dict(orient="records")
         return jsonify({
             "success": True, 
-            "events": events_list,
+            "slots": events_list,
             "message": f"Found {len(events_list)} events for {date_str}"
         })
     
@@ -219,7 +217,7 @@ def get_events_by_datetime():
             
         return jsonify({
             "success": True, 
-            "events": events_list,
+            "slots": events_list,
             "message": message
         })
     
@@ -240,8 +238,7 @@ def check_slot_availability():
         
         return jsonify({
             "success": True, 
-            "available": is_available,
-            "reason": reason
+            "message": f"{is_available}, {reason}"
         })
     
     except Exception as e:
@@ -306,7 +303,7 @@ def update_event():
         return jsonify({
             "success": True, 
             "message": "Event updated successfully",
-            "details": {
+            "slots": {
                 "old_start": old_start_time.isoformat(),
                 "new_start": new_start_time.isoformat(),
                 "new_end": new_end_time.isoformat()

@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from crewai import Agent, Crew, Task, Process, LLM
 from crewai.tools import tool
+import ast
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables
@@ -27,7 +28,7 @@ os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 # Initialize AI Model
 llm_2 = ChatGoogleGenerativeAI(model="gemini-2.0-flash",
                              verbose=True,
-                             temperature=0.6,
+                             temperature=0,
                              google_api_key=GEMINI_API_KEY)
 llm = LLM(model="gemini/gemini-2.0-flash")
 
@@ -212,7 +213,7 @@ def get_events_tool(date: str) -> Dict:
         response = requests.get(f"{API_BASE_URL}/get-events-by-date", params={"date": date})
         response_data = response.json()
         if response_data.get("success") == True:
-            return {"success": True, "data": response_data}
+            return {"success": True, "slots": response_data}
         else:
             return {"success": False, "error": response_data.get("error", "Unknown error")}
     except Exception as e:
@@ -248,7 +249,7 @@ def get_available_slots_tool(date: str, duration: str) -> Dict:
         )
         response_data = response.json()
         if response_data.get("success") == True:
-            return {"success": True, "data": response_data}
+            return {"success": True, "slots": response_data}
         else:
             return {"success": False, "error": response_data.get("error", "Unknown error")}
     except Exception as e:
@@ -294,7 +295,18 @@ def delete_event_tool(date_time: str, duration: str) -> Dict:
 calendar_agent = Agent(
     role="Calendar Assistant",
     goal="Help users manage their calendar seamlessly",
-    backstory="You're an AI-powered calendar manager that schedules, updates, retrieves, and manages events.",
+    backstory="""You're an AI-powered calendar manager that schedules, updates, retrieves, and manages events. And you always return the output in json format only. The format is: 
+     {
+        "message": "Generalized response message",
+        "success": true,
+        "slots": [
+            {
+            "start": "ISO 8601 datetime format",
+            "end": "ISO 8601 datetime format"
+            }
+        ]
+        }
+    """,
     verbose=True,
     allow_delegation=False,
     llm=llm,
@@ -323,7 +335,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": "User initiated a casual conversation.",
-                "expected_output": response,
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "conversation_type": "casual",
                 "response": response,  # Keeping the response data
                 "conversation_history": get_conversation_context(),
@@ -341,7 +362,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": "Failed to parse user intent.",
-                "expected_output": response,
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "response": response,
                 "conversation_history": get_conversation_context(),
                 "current_date": current_date.strftime("%Y-%m-%d")
@@ -366,7 +396,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": f"Request missing information for {intent}",
-                "expected_output": response,
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "response": response,
                 "missing_fields": missing_fields,
                 "conversation_history": get_conversation_context(),
@@ -396,7 +435,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": f"Create a calendar event for {description}",
-                "expected_output": "Success message confirming event creation.",
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "intent": "create_event",
                 "event_details": {
                     "date_time": date_time,
@@ -415,7 +463,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": f"Fetch all scheduled events for {date_time}",
-                "expected_output": "A list of events or a message if none exist.",
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "intent": "get_events",
                 "date": date_time,
                 "required_tool": "get_events_tool",
@@ -430,7 +487,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": f"Check if there are free slots on {date_time} for {duration} minutes.",
-                "expected_output": "A list of available time slots or a message indicating no availability.",
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "intent": "check_availability",
                 "date_time": date_time,
                 "duration": duration,
@@ -447,7 +513,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": f"Update a calendar event from {old_date_time} to {date_time}",
-                "expected_output": "Success message confirming event update.",
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "intent": "update_event",
                 "old_date_time": old_date_time,
                 "new_date_time": date_time,
@@ -460,16 +535,24 @@ def create_calendar_task(user_input):
         )
     elif intent == "delete_event":
         task = Task(
-            description=f"Delete event: {description} on {date_time}",
+            description=f"Delete event on {date_time}",
             expected_output="Confirmation of event deletion",
             agent=calendar_agent,
             context=[{
                 "description": f"Delete a calendar event for {description} on {date_time}",
-                "expected_output": "Success message confirming event deletion.",
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "intent": "delete_event",
                 "date_time": date_time,
                 "duration": duration,
-                "description": description,
                 "required_tool": "delete_event_tool",
                 "conversation_history": get_conversation_context(),
                 "current_date": current_date.strftime("%Y-%m-%d")
@@ -482,7 +565,16 @@ def create_calendar_task(user_input):
             agent=calendar_agent,
             context=[{
                 "description": f"Find all available time slots on {date_time} for a {duration}-minute meeting.",
-                "expected_output": "A list of available time slots or a message indicating no availability.",
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "intent": "get_available_slots",
                 "date": date_time,
                 "duration": duration,
@@ -500,11 +592,39 @@ def create_calendar_task(user_input):
                 "intent": "clarify",
                 "message": "I'm not sure what you're asking for. Could you provide more details about what you'd like to do with your calendar?",
                 "conversation_history": get_conversation_context(),
+                "expected_output": """Make sure that the output should be in format: {
+                    "message": "Generalized response message",
+                    "success": true,
+                    "slots": [
+                        {
+                        "start": "ISO 8601 datetime format",
+                        "end": "ISO 8601 datetime format"
+                        }
+                    ]
+                    }""",
                 "current_date": current_date.strftime("%Y-%m-%d")
             }]
         )
     
     return task
+
+def clean_json_string(input_string: str) -> str:
+    """
+    Removes backticks and optional 'json' tags from a JSON-like string
+    and returns a properly formatted JSON string.
+    
+    :param input_string: The raw string containing JSON data.
+    :return: A formatted JSON string.
+    """
+    # Remove triple backticks and "json" if present
+    cleaned_string = re.sub(r"^```json|```$", "", input_string.strip(), flags=re.MULTILINE).strip()
+
+    # Load it into a dictionary to validate and reformat
+    try:
+        json_data = json.loads(cleaned_string)
+        return json.dumps(json_data, indent=4)  # Pretty-print JSON
+    except json.JSONDecodeError:
+        raise ValueError("Invalid JSON format!")
 
 def process_user_message(user_input: str) -> Dict[str, Any]:
     """Process user input and return response"""
@@ -530,11 +650,18 @@ def process_user_message(user_input: str) -> Dict[str, Any]:
         print(f'agent: {result}')
         print(result.raw)
         print('----------------------')
+        print(type(result.raw))
+        print('----------------------')
         
-        return {
-            "success": True,
-            "message": result.raw
-        }
+        try:
+            final_ans = clean_json_string(result.raw)
+            return json.loads(final_ans)
+        except Exception as e:
+            return {
+                "success": True,
+                "message": result.raw
+            }
+
     except Exception as e:
         error_message = f"Error processing message: {str(e)}"
         return {
