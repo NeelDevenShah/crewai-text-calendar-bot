@@ -431,7 +431,7 @@ def create_calendar_task(user_input):
     if intent == "create_event":
         task = Task(
             description=f"Create an event: {description} on {date_time} for {duration} minutes",
-            expected_output="Confirmation of event creation",
+            expected_output="Confirmation of event creation, and if the message like `Event cannot cross day boundaries` or the `Start time must be after` or `Start time must be before` is comming then make sure pass that message to the user, and ask for conformation instead of changing the time given by user.",
             agent=calendar_agent,
             context=[{
                 "description": f"Create a calendar event for {description}",
@@ -683,17 +683,22 @@ def handle_message():
     user_message = data['message']
     response = process_user_message(user_message)
     return response
-    
-
+        
+# TODO: Fix it
 @app.route('/api/history', methods=['GET'])
 def get_history():
     """API endpoint to get conversation history"""
+    
+    print('$$$$$$$$$$$$$$$$$$$$')
+    print(conversation_history)
+    print('$$$$$$$$$$$$$$$$$$$$')
+    
     return jsonify({
         "success": True,
-        "history": conversation_history
+        "history": json.dumps(conversation_history)  # Convert to string
     })
 
-@app.route('/api/clear-history', methods=['POST'])
+@app.route('/api/clear-history', methods=['GET'])
 def clear_history():
     """API endpoint to clear conversation history"""
     global conversation_history
