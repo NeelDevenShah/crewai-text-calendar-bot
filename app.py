@@ -1,29 +1,41 @@
 import os
 import datetime
-import pandas as pd
-from flask import Flask, request, render_template, jsonify
 import re
+from flask import Flask, request, render_template, jsonify
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from dateutil import parser
+import requests
+import pytz
 
 app = Flask(__name__)
 
 # Configuration
-CSV_CALENDAR_FILE = "calendar.csv"
-TIMEZONE = "America/New_York"
-WORKING_HOURS = (9, 17)  # Office hours (9 AM - 5 PM) - centralized definition
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+TIMEZONE = "Asia/Kolkata"
+WORKING_HOURS = (9, 17)  # Office hours (9 AM - 5 PM)
 
-# Ensure CSV file exists
-def initialize_calendar():
-    if not os.path.exists(CSV_CALENDAR_FILE):
-        df = pd.DataFrame(columns=["start_time", "end_time", "description"])
-        df.to_csv(CSV_CALENDAR_FILE, index=False)
+def get_calendar_service():
+    """Gets an authorized Google Calendar API service instance."""
+    creds = None
+    # The file token.json stores the user's access and refresh tokens
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    # If there are no (valid) credentials available, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
 
-# Load calendar from CSV
-def load_calendar():
-    return pd.read_csv(CSV_CALENDAR_FILE, parse_dates=["start_time", "end_time"], infer_datetime_format=True)
-
-# Save calendar to CSV
-def save_calendar(df):
-    df.to_csv(CSV_CALENDAR_FILE, index=False)
+    return build('calendar', 'v3', credentials=creds)
 
 # Check if time is within working hours
 def is_within_working_hours(start_time, end_time):
@@ -49,51 +61,48 @@ def is_within_working_hours(start_time, end_time):
     
     return True, "Within working hours"
 
-# Check availability
+# Check availability in Google Calendar
 def check_availability(start_time, end_time):
     # First check if the proposed time is within working hours
     within_hours, reason = is_within_working_hours(start_time, end_time)
     if not within_hours:
         return False, reason
     
-    df = load_calendar()
-    for _, row in df.iterrows():
-        if (start_time < row["end_time"]) and (end_time > row["start_time"]):
-            return False, "Time slot conflicts with an existing event"
+    service = get_calendar_service()
+
+    # Format times for Google Calendar API
+    start_time_str = start_time.isoformat()
+    end_time_str = end_time.isoformat()
+    
+    # Check for conflicts in the calendar
+    events_result = service.events().list(
+        calendarId='primary',
+        timeMin=start_time_str,
+        timeMax=end_time_str,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+    
+    events = events_result.get('items', [])
+    if events:
+        return False, "Time slot conflicts with an existing event"
+    
     return True, "Time slot is available"
 
-# Create event
-def create_event(start_time, end_time, description):
-    is_available, reason = check_availability(start_time, end_time)
-    if is_available:
-        df = load_calendar()
-        new_event = pd.DataFrame([[start_time, end_time, description]], columns=["start_time", "end_time", "description"])
-        df = pd.concat([df, new_event], ignore_index=True)
-        save_calendar(df)
-        return True, "Event created successfully"
-    return False, reason
-
-# Delete event
-def delete_event(start_time):
-    df = load_calendar()
+# Delete event from Google Calendar
+def delete_event(event_id):
+    service = get_calendar_service()
     
-    # Find the matching event
-    match_index = df[
-        (df["start_time"] == start_time)
-    ].index
-
-    if not match_index.empty:
-        df = df.drop(match_index).reset_index(drop=True)
-        save_calendar(df)
+    try:
+        service.events().delete(calendarId='primary', eventId=event_id).execute()
         return True, "Event deleted successfully"
-    return False, "Event not found with the specified details"
+    except Exception as e:
+        return False, f"Error deleting event: {str(e)}"
 
 @app.route('/available-slots', methods=['GET'])
 def get_available_slots():
     """
     Finds available time slots for a given date and meeting duration.
-
-    :return: List of available time slots.
     """
     date_str = request.args.get('date')  # Expected format: "YYYY-MM-DD"
     duration_str = request.args.get('duration')  # Expected format: "60 minutes" or similar
@@ -104,67 +113,84 @@ def get_available_slots():
         return jsonify({"success": False, "error": "Invalid duration format"})
 
     duration = int(duration_match.group())
-
-    df = load_calendar()
-    date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-
     slot_duration = datetime.timedelta(minutes=duration)
-
-    # Filter events for the given date
-    events = df[(df["start_time"].dt.date == date)]
-
-    # Generate all possible time slots
-    start_time = datetime.datetime.combine(date, datetime.time(WORKING_HOURS[0], 0))
-    end_time = datetime.datetime.combine(date, datetime.time(WORKING_HOURS[1], 0))
-
+    
+    # Parse date and create time bounds
+    date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+    start_of_day = datetime.datetime.combine(date, datetime.time(WORKING_HOURS[0], 0))
+    end_of_day = datetime.datetime.combine(date, datetime.time(WORKING_HOURS[1], 0))
+    
+    # Convert to timezone aware datetime
+    timezone = pytz.timezone(TIMEZONE)
+    start_of_day = timezone.localize(start_of_day)
+    end_of_day = timezone.localize(end_of_day)
+    
+    # Format for API
+    start_time_str = start_of_day.isoformat()
+    end_time_str = end_of_day.isoformat()
+    
+    service = get_calendar_service()
+    
+    # Get all events for the day
+    events_result = service.events().list(
+        calendarId='primary',
+        timeMin=start_time_str,
+        timeMax=end_time_str,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+    
+    events = events_result.get('items', [])
+    
+    # Find all free slots
     free_slots = []
-    current_time = start_time
-
-    while current_time + slot_duration <= end_time:
-        potential_end_time = current_time + slot_duration
-
-        # Check if slot overlaps with any event
-        is_conflicting = events.apply(
-            lambda row: (current_time < row["end_time"]) and (potential_end_time > row["start_time"]), axis=1
-        ).any()
-
-        if not is_conflicting:
-            free_slots.append({"start": current_time.isoformat(), "end": potential_end_time.isoformat()})
-
-        current_time += datetime.timedelta(minutes=30)  # Move to the next possible slot in 30-minute increments
-
+    current_time = start_of_day
+    
+    # If no events, the entire day is free
+    if not events:
+        while current_time + slot_duration <= end_of_day:
+            free_slots.append({
+                "start": current_time.isoformat(),
+                "end": (current_time + slot_duration).isoformat()
+            })
+            current_time += datetime.timedelta(minutes=30)
+    else:
+        # Process each event and find gaps
+        for event in events:
+            event_start = parser.parse(event['start'].get('dateTime', event['start'].get('date')))
+            event_end = parser.parse(event['end'].get('dateTime', event['end'].get('date')))
+            
+            # Add free slots before this event
+            while current_time + slot_duration <= event_start:
+                free_slots.append({
+                    "start": current_time.isoformat(),
+                    "end": (current_time + slot_duration).isoformat()
+                })
+                current_time += datetime.timedelta(minutes=30)
+            
+            # Move current time to after this event
+            current_time = event_end
+        
+        # Add any remaining slots after the last event
+        while current_time + slot_duration <= end_of_day:
+            free_slots.append({
+                "start": current_time.isoformat(),
+                "end": (current_time + slot_duration).isoformat()
+            })
+            current_time += datetime.timedelta(minutes=30)
+    
     return jsonify({
         "success": True, 
         "slots": free_slots,
         "message": f"Found {len(free_slots)} available time slots for the requested date and duration"
     })
 
-@app.route('/add', methods=['POST'])
-def add_event():
-    data = request.json
-    try:
-        start_time = datetime.datetime.strptime(data['start_time'], "%Y-%m-%dT%H:%M")
-        end_time = start_time + datetime.timedelta(minutes=int(data['duration']))
-        
-        # Check if the event is within working hours
-        within_hours, reason = is_within_working_hours(start_time, end_time)
-        if not within_hours:
-            return jsonify({"success": False, "error": reason})
-        
-        success, message = create_event(start_time, end_time, data['description'])
-        if success:
-            return jsonify({"success": True, "message": message})
-        else:
-            return jsonify({"success": False, "error": message})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
 @app.route('/delete', methods=['DELETE'])
 def delete_event_route():
     data = request.json
     try:
-        start_time = datetime.datetime.strptime(data['start_time'], "%Y-%m-%dT%H:%M")
-        success, message = delete_event(start_time)
+        event_id = data['event_id']
+        success, message = delete_event(event_id)
         if success:
             return jsonify({"success": True, "message": message})
         else:
@@ -178,14 +204,39 @@ def get_events_by_date():
     
     try:
         date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-        df = load_calendar()
         
-        # Filter events happening on the given date
-        filtered_events = df[
-            (df["start_time"].dt.date == date)
-        ]
-
-        events_list = filtered_events.to_dict(orient="records")
+        # Create time bounds for the day
+        start_of_day = datetime.datetime.combine(date, datetime.time(0, 0))
+        end_of_day = datetime.datetime.combine(date, datetime.time(23, 59, 59))
+        
+        # Convert to timezone aware datetime
+        timezone = pytz.timezone(TIMEZONE)
+        start_of_day = timezone.localize(start_of_day)
+        end_of_day = timezone.localize(end_of_day)
+        
+        service = get_calendar_service()
+        
+        # Get all events for the day
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=start_of_day.isoformat(),
+            timeMax=end_of_day.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        # Format events for the response
+        events_list = []
+        for event in events:
+            events_list.append({
+                "id": event['id'],
+                "start_time": event['start'].get('dateTime', event['start'].get('date')),
+                "end_time": event['end'].get('dateTime', event['end'].get('date')),
+                "description": event.get('summary', 'No description')
+            })
+        
         return jsonify({
             "success": True, 
             "slots": events_list,
@@ -201,15 +252,43 @@ def get_events_by_datetime():
     
     try:
         event_datetime = datetime.datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M")
-        df = load_calendar()
         
-        # Find if there's an event at the exact date-time
-        filtered_events = df[
-            (df["start_time"] <= event_datetime) & 
-            (df["end_time"] > event_datetime)
-        ]
-
-        events_list = filtered_events.to_dict(orient="records")
+        # Add timezone information
+        timezone = pytz.timezone(TIMEZONE)
+        event_datetime = timezone.localize(event_datetime)
+        
+        # Create a small window around the requested time
+        start_time = event_datetime - datetime.timedelta(minutes=1)
+        end_time = event_datetime + datetime.timedelta(minutes=1)
+        
+        service = get_calendar_service()
+        
+        # Get events that may be happening at the requested time
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=start_time.isoformat(),
+            timeMax=end_time.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        # Format events for the response
+        events_list = []
+        for event in events:
+            event_start = parser.parse(event['start'].get('dateTime', event['start'].get('date')))
+            event_end = parser.parse(event['end'].get('dateTime', event['end'].get('date')))
+            
+            # Only include events that actually overlap with the requested time
+            if event_start <= event_datetime <= event_end:
+                events_list.append({
+                    "id": event['id'],
+                    "start_time": event['start'].get('dateTime', event['start'].get('date')),
+                    "end_time": event['end'].get('dateTime', event['end'].get('date')),
+                    "description": event.get('summary', 'No description')
+                })
+        
         if events_list:
             message = f"Found {len(events_list)} event(s) at the specified time"
         else:
@@ -237,8 +316,9 @@ def check_slot_availability():
         is_available, reason = check_availability(start_time, end_time)
         
         return jsonify({
-            "success": True, 
-            "message": f"{is_available}, {reason}"
+            "success": True,
+            "available": is_available,
+            "message": reason
         })
     
     except Exception as e:
@@ -248,8 +328,7 @@ def check_slot_availability():
 def update_event():
     data = request.json
     try:
-        # Parse old and new times
-        old_start_time = datetime.datetime.strptime(data['old_start_time'], "%Y-%m-%dT%H:%M")
+        event_id = data['event_id']
         new_start_time = datetime.datetime.strptime(data['new_start_time'], "%Y-%m-%dT%H:%M")
         new_end_time = new_start_time + datetime.timedelta(minutes=int(data['duration']))
         
@@ -258,61 +337,73 @@ def update_event():
         if not within_hours:
             return jsonify({"success": False, "error": reason})
         
-        # Load existing events
-        df = load_calendar()
+        service = get_calendar_service()
         
-        # Find the event with the old start time
-        event_index = df[df["start_time"] == old_start_time].index
-        if event_index.empty:
-            return jsonify({"success": False, "error": "Event not found"})
-
-        # Store the index before removing (needed for reinsertion)
-        event_index_value = event_index[0]
+        # Get the event first
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
         
-        # Store the old event data
-        old_event = df.loc[event_index_value].copy()
-        
-        # Temporarily remove the event from the dataframe
-        temp_df = df.drop(event_index).reset_index(drop=True)
+        # Temporarily delete the event to check for conflicts
+        service.events().delete(calendarId='primary', eventId=event_id).execute()
         
         # Check if the new time slot is available
-        conflict_found = False
-        conflict_reason = ""
+        is_available, reason = check_availability(new_start_time, new_end_time)
         
-        for _, row in temp_df.iterrows():
-            if (new_start_time < row["end_time"]) and (new_end_time > row["start_time"]):
-                conflict_found = True
-                conflict_reason = f"Time slot conflicts with event: {row['description']}"
-                break
+        if not is_available:
+            # Re-insert the original event if the new time isn't available
+            service.events().insert(calendarId='primary', body=event).execute()
+            return jsonify({"success": False, "error": reason})
         
-        if conflict_found:
-            return jsonify({"success": False, "error": conflict_reason})
-
-        # Create a new row with updated times
-        updated_row = pd.Series({
-            "start_time": new_start_time,
-            "end_time": new_end_time,
-            "description": data.get('description', old_event["description"])
-        })
+        # Update the event with new times
+        event['start'] = {
+            'dateTime': new_start_time.isoformat(),
+            'timeZone': TIMEZONE,
+        }
+        event['end'] = {
+            'dateTime': new_end_time.isoformat(),
+            'timeZone': TIMEZONE,
+        }
         
-        # Add back the updated event
-        df.loc[event_index_value] = updated_row
-        df.sort_values(by="start_time", inplace=True)  # Keep events in order
-        save_calendar(df)
-
+        if 'description' in data:
+            event['description'] = data['description']
+            event['summary'] = data['description']
+            
+        updated_event = service.events().insert(calendarId='primary', body=event).execute()
+        
         return jsonify({
             "success": True, 
             "message": "Event updated successfully",
-            "slots": {
-                "old_start": old_start_time.isoformat(),
-                "new_start": new_start_time.isoformat(),
-                "new_end": new_end_time.isoformat()
-            }
+            "event_id": updated_event['id']
         })
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/add', methods=['POST'])
+def quick_add_event():
+    """Endpoint to quickly add an event using Google Calendar's quickAdd feature"""
+    data = request.json
+    try:
+        text = data['text']  # E.g. "Meeting with John tomorrow at 3pm"
+        
+        service = get_calendar_service()
+        created_event = service.events().quickAdd(
+            calendarId='primary',
+            text=text
+        ).execute()
+        
+        return jsonify({
+            "success": True,
+            "message": "Event created successfully",
+            "event_id": created_event['id'],
+            "event_details": {
+                "summary": created_event.get('summary', 'No title'),
+                "start": created_event['start'].get('dateTime', created_event['start'].get('date')),
+                "end": created_event['end'].get('dateTime', created_event['end'].get('date'))
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 if __name__ == '__main__':
-    initialize_calendar()
     app.run(debug=True)
