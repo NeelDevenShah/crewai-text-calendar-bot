@@ -94,25 +94,6 @@ pip install -r requirements.txt
 
 ---
 
-### 3. PHP Frontend
-
-```bash
-cd frontend
-php -S localhost:8080
-```
-
-Make sure the frontend points to the Flask backend at `http://localhost:5000`.
-
----
-
-### 4. Run the Bot
-
-```bash
-python main.py
-```
-
----
-
 ## 💬 Example Commands
 
 | Command Example                           | Task Handled By Agent Tool |
