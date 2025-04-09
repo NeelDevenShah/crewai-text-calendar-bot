@@ -76,6 +76,18 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### 3. Run the calender API
+
+```bash
+python app.py
+```
+
+### 4. Run the calender API
+
+```bash
+python crewai_agent.py
+```
+
 #### `config.json`
 
 ```json
