@@ -9,6 +9,9 @@ from googleapiclient.discovery import build
 from dateutil import parser
 import requests
 import pytz
+# from datetime import datetime
+import datetime
+from dateutil.parser import parse
 
 app = Flask(__name__)
 
@@ -40,6 +43,10 @@ def get_calendar_service():
 # Check if time is within working hours
 def is_within_working_hours(start_time, end_time):
     # Check if both start and end times are within working hours on their respective days
+    
+    start_time = parse(start_time)
+    end_time = parse(end_time)
+    
     start_hour = start_time.hour
     end_hour = end_time.hour
     
@@ -302,57 +309,35 @@ def get_events_by_datetime():
     
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
-
-@app.route('/check-specific-availability', methods=['GET'])
-def check_slot_availability():
-    datetime_str = request.args.get('datetime')  # Expected: "YYYY-MM-DDTHH:MM"
-    duration = int(request.args.get('duration'))  # Expected: Minutes
-
-    try:
-        start_time = datetime.datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M")
-        end_time = start_time + datetime.timedelta(minutes=duration)
-        
-        # Check if the event is within working hours and available
-        is_available, reason = check_availability(start_time, end_time)
-        
-        return jsonify({
-            "success": True,
-            "available": is_available,
-            "message": reason
-        })
-    
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
     
 @app.route('/update-event', methods=['PUT'])
 def update_event():
     data = request.json
     try:
         event_id = data['event_id']
-        new_start_time = datetime.datetime.strptime(data['new_start_time'], "%Y-%m-%dT%H:%M")
+        new_start_time = datetime.datetime.fromisoformat(data['new_start_time'])
         new_end_time = new_start_time + datetime.timedelta(minutes=int(data['duration']))
         
+        # Convert to the correct timezone
+        tz = pytz.timezone(TIMEZONE)
+        new_start_time = tz.localize(new_start_time)
+        new_end_time = tz.localize(new_end_time)
+
         # Check if the new time is within working hours
         within_hours, reason = is_within_working_hours(new_start_time, new_end_time)
         if not within_hours:
             return jsonify({"success": False, "error": reason})
-        
+
         service = get_calendar_service()
-        
-        # Get the event first
+
+        # Get the current event details
         event = service.events().get(calendarId='primary', eventId=event_id).execute()
-        
-        # Temporarily delete the event to check for conflicts
-        service.events().delete(calendarId='primary', eventId=event_id).execute()
-        
-        # Check if the new time slot is available
+
+        # Check if the new time slot is available before updating
         is_available, reason = check_availability(new_start_time, new_end_time)
-        
         if not is_available:
-            # Re-insert the original event if the new time isn't available
-            service.events().insert(calendarId='primary', body=event).execute()
             return jsonify({"success": False, "error": reason})
-        
+
         # Update the event with new times
         event['start'] = {
             'dateTime': new_start_time.isoformat(),
@@ -362,15 +347,15 @@ def update_event():
             'dateTime': new_end_time.isoformat(),
             'timeZone': TIMEZONE,
         }
-        
+
         if 'description' in data:
             event['description'] = data['description']
             event['summary'] = data['description']
-            
-        updated_event = service.events().insert(calendarId='primary', body=event).execute()
-        
+
+        updated_event = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
+
         return jsonify({
-            "success": True, 
+            "success": True,
             "message": "Event updated successfully",
             "event_id": updated_event['id']
         })
@@ -383,13 +368,28 @@ def quick_add_event():
     """Endpoint to quickly add an event using Google Calendar's quickAdd feature"""
     data = request.json
     try:
-        text = data['text']  # E.g. "Meeting with John tomorrow at 3pm"
+        
+        # TODO: Make sure to send this thing as input
+        # # Check if the new time slot is available before updating
+        # is_available, reason = check_availability(new_start_time, new_end_time)
+        # if not is_available:
+        #     return jsonify({"success": False, "error": reason})
+        
+        text = data['description']  # E.g. "Meeting with John tomorrow at 3pm"
         
         service = get_calendar_service()
         created_event = service.events().quickAdd(
             calendarId='primary',
             text=text
         ).execute()
+        
+        start_time = created_event['start']['dateTime']
+        end_time = created_event['end']['dateTime']
+        
+        within_hours, reason = is_within_working_hours(start_time, end_time)
+        if not within_hours:
+            service.events().delete(calendarId='primary', eventId=created_event['id']).execute()
+            return jsonify({"success": False, "reason": reason})
         
         return jsonify({
             "success": True,
